@@ -1,0 +1,134 @@
+import streamlit as st
+from pymongo import MongoClient
+from googleapiclient.discovery import build
+import re
+
+# Initialize a MongoDB client and connect to your MongoDB database
+client = MongoClient("mongodb+srv://Mukesh26:F5jbqWKTUcuVwBEH@cluster0.rzqyk7m.mongodb.net/?retryWrites=true&w=majority")
+db = client["youtube"]
+collection = db["videos"]
+
+# Initialize YouTube API client with your API key
+YOUTUBE_API_KEY = "AIzaSyDgbCq4C20yaffro0daWEV-hfLLxw4icTg"  # Replace with your API key
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+
+# Create a Streamlit app
+st.title("YouTube Data Fetcher")
+
+# Create an input field for the search query
+query = st.text_input("Enter search query:")
+
+if st.button("Search"):
+    try:
+        # Define the YouTube API request for video search
+        video_request = youtube.search().list(
+            q=query,
+            type='video',
+            part='id,snippet',
+            maxResults=2  # Adjust the number of results as needed
+        )
+
+        # Execute the video search request and retrieve search results
+        video_response = video_request.execute()
+
+        # Insert the retrieved YouTube video data into MongoDB
+        for item in video_response['items']:
+            video_id = item['id']['videoId']
+
+            # Additional request to get video details including contentDetails
+            video_details_request = youtube.videos().list(
+                part='snippet,statistics,contentDetails',
+                id=video_id
+            )
+
+            video_details_response = video_details_request.execute()
+
+            # Extract video statistics
+            video_statistics = video_details_response['items'][0]['statistics']
+
+            # Check if comments are disabled
+            comment_count = int(video_statistics.get('commentCount', 0))
+
+            if comment_count == 0:
+                st.warning("Comments are disabled for this video.")
+            else:
+                # Extract 'likeCount' and 'dislikeCount'
+                like_count = int(video_statistics.get('likeCount', 0))
+                dislike_count = int(video_statistics.get('dislikeCount', 0))
+
+                video_data = video_details_response['items'][0]['snippet']
+
+                # Additional request to get video content details including duration
+                video_content_details = video_details_response['items'][0]['contentDetails']
+                video_duration = video_content_details['duration']
+
+                # Use regular expressions to extract hours, minutes, and seconds
+                duration_match = re.match(r'PT(\d+H)?(\d+M)?(\d+S)?', video_duration)
+                hours = int(duration_match.group(1)[:-1]) if duration_match.group(1) else 0
+                minutes = int(duration_match.group(2)[:-1]) if duration_match.group(2) else 0
+                seconds = int(duration_match.group(3)[:-1]) if duration_match.group(3) else 0
+
+                # Calculate the total duration in seconds
+                total_seconds = (hours * 3600) + (minutes * 60) + seconds
+
+                # Format the duration as HH:MM:SS
+                formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+                # Display video details in Streamlit
+                st.subheader(video_data['title'])
+                st.write("Description:", video_data['description'])
+                st.write("Published At:", video_data['publishedAt'])
+                st.write("View Count:", video_statistics['viewCount'])
+                st.write("Like Count:", like_count)
+                st.write("Dislike Count:", dislike_count)
+                st.write("Duration:", formatted_duration)  # Display video duration
+                st.image(video_data['thumbnails']['default']['url'])
+
+                # Additional request to get video comments
+                video_comments_request = youtube.commentThreads().list(
+                    part='snippet',
+                    videoId=video_id,
+                    maxResults=5  # Adjust the number of comments as needed
+                )
+
+                video_comments_response = video_comments_request.execute()
+
+            # Initialize an empty comments_data list outside the loop
+            comments_data = []
+
+            # Loop through video comments and add them to the comments_data list
+            for comment_item in video_comments_response['items']:
+                comment_snippet = comment_item['snippet']['topLevelComment']['snippet']
+
+                comment_data = {
+                    'Comment_Text': comment_snippet['textDisplay'],
+                    'Comment_Author': comment_snippet['authorDisplayName'],
+                    'Comment_PublishedAt': comment_snippet['publishedAt'],
+                }
+
+                comments_data.append(comment_data)
+
+            # Now, video_statistics, like_count, and dislike_count are defined
+            # and can be used in the video_data dictionary
+            video_data = {
+                'Video_Id': video_id,
+                'Video_Name': item['snippet']['title'],
+                'Video_Description': item['snippet']['description'],
+                'Tags': item['snippet']['tags'] if 'tags' in item['snippet'] else [],
+                'PublishedAt': item['snippet']['publishedAt'],
+                'View_Count': int(video_statistics['viewCount']),
+                'Like_Count': like_count,
+                'Dislike_Count': dislike_count,
+                'Duration': formatted_duration,  # Store video duration
+                'Thumbnail': item['snippet']['thumbnails']['default']['url'],
+                # You can choose the desired thumbnail size
+                'Caption_Status': 'Not Available',  # You can fetch this data separately if needed
+                'Comments': comments_data,  # Use the comments_data list here
+            }
+            collection.insert_one({video_id: video_data})
+        st.success("Data saved to MongoDB Atlas!")
+
+        # Close the MongoDB connection
+        client.close()
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
